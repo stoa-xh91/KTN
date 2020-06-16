@@ -6,7 +6,7 @@ We discover that aside from the knowledge transfer machine, current densepose es
 Solid experiments on densepose estimation benchmarks demonstrate the superiority and generalizability of our approach.
 ![](https://github.com/cfm-wxh/TSN/blob/master/visualization/KTN.png)
 # Main Results on Densepose-COCO validation set
-![](https://github.com/cfm-wxh/TSN/blob/master/visualization/main_results.jpg)
+![](https://github.com/cfm-wxh/TSN/blob/master/visualization/main_result.jpg)
 # Environment
 The code is developed based on the [Detectron2](https://github.com/facebookresearch/detectron2) platform. NVIDIA GPUs are needed. The code is developed and tested using 4 NVIDIA RTX GPU cards. Other platforms or GPU cards are not fully tested.
 # Installation
