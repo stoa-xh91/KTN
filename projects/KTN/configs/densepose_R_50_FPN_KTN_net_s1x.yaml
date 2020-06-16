@@ -2,7 +2,7 @@ _BASE_: "Base-DensePose-RCNN.yaml"
 INPUT:
   MIN_SIZE_TRAIN: (640, 672, 704, 736, 768, 800)
 MODEL:
-  WEIGHTS: "/home/wangxuanhan/research/project/detectron2-master/coco_dp_exps/ResNet50_fpn_MID_Kpt_Net_1lx/model_final.pth"
+  WEIGHTS: "models/Keypoints_KTN_Weights.pth"
   KEYPOINT_ON: True
   DENSEPOSE_ON: True
   ROI_DENSEPOSE_HEAD:
@@ -12,8 +12,8 @@ MODEL:
     INDEX_WEIGHTS: 2.0
     POINT_REGRESSION_WEIGHTS: 0.01
     BODY_MASK_WEIGHTS: 5.0
-    KPT_CLASSIFIER_WEIGHT_DIR: "/home/wangxuanhan/research/project/detectron2-master/coco_dp_exps/ResNet50_fpn_MID_Kpt_Net_1lx/kpt_classifier.pkl"
-    KPT_SURF_RELATION_DIR: "/home/wangxuanhan/research/project/visual_genome_python_driver/kpt_surface_relationships.pkl"
+    KPT_CLASSIFIER_WEIGHT_DIR: "models/keypoints_kpt_classifier_weights.pkl"
+    KPT_SURF_RELATION_DIR: "models/kpt_surface_relationships.pkl"
     PREDICTOR: "DensePoseKptRelationPredictor"
     POOLER_RESOLUTION: 28
     HEATMAP_SIZE: 112
