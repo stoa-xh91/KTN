@@ -18,8 +18,7 @@ MODEL:
     UP_SCALE: 2
     KPT_UP_SCALE: 2
     KPT_CLASSIFIER_WEIGHT_DIR: "/home/wangxuanhan/research/project/detectron2-master/coco_dp_exps/ResNet50_fpn_Kpt_Net_1lx/kpt_classifier.pkl"
-#    PREDICTOR: "DensePoseKptRelationPredictor"
-    PREDICTOR: "DensePoseKptRelationPredictorV2"
+    PREDICTOR: "DensePoseKptRelationPredictorV1"
     KPT_SURF_RELATION_DIR: "/home/wangxuanhan/research/project/visual_genome_python_driver/kpt_surface_relationships.pkl"
   ROI_KEYPOINT_HEAD:
     RCNN_HEAD_ON: False

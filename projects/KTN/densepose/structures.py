@@ -197,12 +197,13 @@ def normalized_coords_transform(x0, y0, w, h):
 
 
 class DensePoseOutput(object):
-    def __init__(self, S, I, U, V, M):
+    def __init__(self, S, I, U, V, M, mask_thresh=0.5):
         self.S = S
         self.I = I  # noqa: E741
         self.U = U
         self.V = V
         self.M = M
+        self.thresh = mask_thresh
         self._check_output_dims(S, I, U, V, M)
 
     def _check_output_dims(self, S, I, U, V, M):
@@ -336,7 +337,7 @@ class DensePoseOutput(object):
         Convert DensePose outputs to results format. Results are more compact,
         but cannot be resampled any more
         """
-        result = DensePoseResult(boxes_xywh, self.S, self.I, self.U, self.V, self.M)
+        result = DensePoseResult(boxes_xywh, self.S, self.I, self.U, self.V, self.M, self.thresh)
         return result
 
     def __getitem__(self, item):
@@ -354,7 +355,7 @@ class DensePoseOutput(object):
             U_selected = self.U[item]
             V_selected = self.V[item]
             M_selected = self.M[item] if self.M is not None else None
-        return DensePoseOutput(S_selected, I_selected, U_selected, V_selected, M_selected)
+        return DensePoseOutput(S_selected, I_selected, U_selected, V_selected, M_selected, self.thresh)
 
     def __str__(self):
         s = "DensePoseOutput S {}, I {}, U {}, V {}".format(
@@ -367,7 +368,7 @@ class DensePoseOutput(object):
 
 
 class DensePoseResult(object):
-    def __init__(self, boxes_xywh, S, I, U, V, M):
+    def __init__(self, boxes_xywh, S, I, U, V, M, mask_thresh=0.5):
         self.results = []
         self.boxes_xywh = boxes_xywh.cpu().tolist()
         assert len(boxes_xywh.size()) == 2
@@ -375,7 +376,7 @@ class DensePoseResult(object):
         for i, box_xywh in enumerate(boxes_xywh):
             est_S = S[[i]] if S is not None else None
             est_M = M[[i]] if M is not None else None
-            result_i = self._output_to_result(box_xywh, est_S, I[[i]], U[[i]], V[[i]], est_M)
+            result_i = self._output_to_result(box_xywh, est_S, I[[i]], U[[i]], V[[i]], est_M, mask_thresh)
             result_numpy_i = result_i.cpu().numpy()
             result_encoded_i = DensePoseResult.encode_png_data(result_numpy_i)
             result_encoded_with_shape_i = (result_numpy_i.shape, result_encoded_i)
@@ -387,7 +388,7 @@ class DensePoseResult(object):
         )
         return s
 
-    def _output_to_result(self, box_xywh, S, I, U, V, M=None):
+    def _output_to_result(self, box_xywh, S, I, U, V, M=None, mask_thresh=0.5):
         x, y, w, h = box_xywh
         w = max(int(w), 1)
         h = max(int(h), 1)
@@ -419,7 +420,7 @@ class DensePoseResult(object):
         else:
             i_bbox = (
                     F.interpolate(I, (h, w), mode="bilinear", align_corners=False).argmax(dim=1)
-                    * (m_score_bbox[:, 1] > 0.3).long()
+                    * (m_score_bbox[:, 1] > mask_thresh).long()
             ).squeeze(0)
         assert len(U.size()) == 4, "U tensor size should have {} " "dimensions but has {}".format(
             4, len(U.size())

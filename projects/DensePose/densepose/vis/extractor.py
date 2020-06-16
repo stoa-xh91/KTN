@@ -9,7 +9,7 @@ from detectron2.structures.instances import Instances
 from densepose.vis.bounding_box import BoundingBoxVisualizer, ScoredBoundingBoxVisualizer
 from densepose.vis.densepose import DensePoseResultsVisualizer
 
-from .base import CompoundVisualizer,KeypointsVisualizer
+from .base import CompoundVisualizer
 
 Scores = Sequence[float]
 
@@ -42,8 +42,6 @@ def create_extractor(visualizer: object):
         return CompoundExtractor([extract_boxes_xywh_from_instances, extract_scores_from_instances])
     elif isinstance(visualizer, BoundingBoxVisualizer):
         return extract_boxes_xywh_from_instances
-    elif isinstance(visualizer, KeypointsVisualizer):
-        return KeypointsResultExtractor()
     else:
         logger = logging.getLogger(__name__)
         logger.error(f"Could not create extractor for {visualizer}")
@@ -92,19 +90,6 @@ class DensePoseResultExtractor(object):
         else:
             return None
 
-class KeypointsResultExtractor(object):
-    """
-    Extracts Keypoints result from instances
-    """
-
-    def __call__(self, instances: Instances, select=None):
-        boxes_xywh = extract_boxes_xywh_from_instances(instances)
-        if instances.has("pred_keypoints") and (boxes_xywh is not None):
-            kpout = instances.pred_keypoints
-            kpout = kpout.cpu().numpy()
-            return kpout
-        else:
-            return None
 
 class CompoundExtractor(object):
     """

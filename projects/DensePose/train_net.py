@@ -12,25 +12,21 @@ import os
 import detectron2.utils.comm as comm
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.config import get_cfg
-from detectron2.data import MetadataCatalog
 from detectron2.data import build_detection_test_loader, build_detection_train_loader
 from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, launch
 from detectron2.evaluation import COCOEvaluator, DatasetEvaluators, verify_results
 from detectron2.utils.logger import setup_logger
 
 from densepose import DatasetMapper, DensePoseCOCOEvaluator, add_densepose_config
-# os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+
 
 class Trainer(DefaultTrainer):
     @classmethod
     def build_evaluator(cls, cfg, dataset_name):
         output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
         evaluators = [COCOEvaluator(dataset_name, cfg, True, output_folder)]
-        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
-        if cfg.MODEL.DENSEPOSE_ON and cfg.MODEL.ROI_DENSEPOSE_HEAD.RCNN_HEAD_ON:
+        if cfg.MODEL.DENSEPOSE_ON:
             evaluators.append(DensePoseCOCOEvaluator(dataset_name, True, output_folder))
-        # if evaluator_type in ["coco", "coco_panoptic_seg"]:
-        #     evaluators.append(COCOEvaluator(dataset_name, cfg, True, output_folder))
         return DatasetEvaluators(evaluators)
 
     @classmethod
@@ -47,7 +43,6 @@ def setup(args):
     add_densepose_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
-    cfg.NUM_GPUS = args.num_gpus
     cfg.freeze()
     default_setup(cfg, args)
     # Setup logger for "densepose" module
@@ -69,9 +64,7 @@ def main(args):
         return res
 
     trainer = Trainer(cfg)
-    print("resume training? ",args.resume)
     trainer.resume_or_load(resume=args.resume)
-    # trainer.resume_or_load()
     return trainer.train()
 
 

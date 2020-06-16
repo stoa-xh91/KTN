@@ -4,18 +4,17 @@
 import copy
 import torch
 from fvcore.common.file_io import PathManager
-import os
+
 from detectron2.data import MetadataCatalog
 from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
-from PIL import Image
-import numpy as np
+
 from .structures import DensePoseDataRelative, DensePoseList, DensePoseTransformData
-import cv2
+
 
 class DatasetMapper:
     """
-    A customized version of `detectron2.data.DatasetMapperper`
+    A customized version of `detectron2.data.DatasetMapper`
     """
 
     def __init__(self, cfg, is_train=True):
@@ -26,7 +25,6 @@ class DatasetMapper:
         self.mask_on        = cfg.MODEL.MASK_ON
         self.keypoint_on    = cfg.MODEL.KEYPOINT_ON
         self.densepose_on   = cfg.MODEL.DENSEPOSE_ON
-        self.dp_segm_on = cfg.MODEL.ROI_DENSEPOSE_HEAD.SEMSEG_ON
         assert not cfg.MODEL.LOAD_PROPOSALS, "not supported yet"
         # fmt: on
         if self.keypoint_on and is_train:
@@ -96,22 +94,8 @@ class DatasetMapper:
         if len(annos) and "densepose" in annos[0]:
             gt_densepose = [obj["densepose"] for obj in annos]
             instances.gt_densepose = DensePoseList(gt_densepose, instances.gt_boxes, image_shape)
-        if self.dp_segm_on:
-            dp_seg_image_root = '/data2/wangxuanhan/datasets/coco2014/images'
-            ori_image_dir = dataset_dict["file_name"].split('/')
-            dp_seg_image_dir = os.path.join(dp_seg_image_root,ori_image_dir[-2], ori_image_dir[-1])
-            with PathManager.open(dp_seg_image_dir, "rb") as f:
-                dp_seg_image = Image.open(f)
-                dp_seg_image = np.asarray(dp_seg_image, dtype="uint8")
-            # dp_seg_image = utils.read_image(dp_seg_image_dir, format=self.img_format)
-            sem_seg_gt = transforms.apply_segmentation(dp_seg_image)
-            sem_seg_gt = sem_seg_gt / 255.
-            # sem_seg_gt = np.repeat(sem_seg_gt[None,:,:], len(instances._fields['gt_boxes']), 0)
-            sem_seg_gt = torch.as_tensor(sem_seg_gt)
-            # instances.gt_dp_segms = sem_seg_gt
-            dataset_dict["sem_seg"] = sem_seg_gt
-        dataset_dict["instances"] = instances[instances.gt_boxes.nonempty()]
 
+        dataset_dict["instances"] = instances[instances.gt_boxes.nonempty()]
         return dataset_dict
 
     def _transform_densepose(self, annotation, transforms):
@@ -131,5 +115,4 @@ class DatasetMapper:
             # NOTE: annotations for certain instances may be unavailable.
             # 'None' is accepted by the DensePostList data structure.
             annotation["densepose"] = None
-
         return annotation

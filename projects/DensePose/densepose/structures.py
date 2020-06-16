@@ -5,7 +5,7 @@ from io import BytesIO
 import torch
 from PIL import Image
 from torch.nn import functional as F
-import cv2
+
 
 class DensePoseTransformData(object):
 
@@ -157,8 +157,7 @@ class DensePoseDataRelative(object):
         uv_symmetries = dp_transform_data.uv_symmetries
         pt_label_symmetries = dp_transform_data.point_label_symmetries
         for i in range(self.N_PART_LABELS):
-            if i + 1 in self.i:
-            # if pt_label_symmetries[i + 1] != i + 1:
+            if pt_label_symmetries[i + 1] != i + 1:
                 annot_indices_i = i_old == i + 1
                 self.i[annot_indices_i] = pt_label_symmetries[i + 1]
                 u_loc = (self.u[annot_indices_i] * 255).long()
@@ -197,38 +196,19 @@ def normalized_coords_transform(x0, y0, w, h):
 
 
 class DensePoseOutput(object):
-    def __init__(self, S, I, U, V, M):
+    def __init__(self, S, I, U, V):
         self.S = S
         self.I = I  # noqa: E741
         self.U = U
         self.V = V
-        self.M = M
-        self._check_output_dims(S, I, U, V, M)
+        self._check_output_dims(S, I, U, V)
 
-    def _check_output_dims(self, S, I, U, V, M):
-        if M is not None:
-            assert (
-                    len(M.size()) == 4
-            ), "Segmentation output should have 4 " "dimensions (NCHW), but has size {}".format(
-                M.size()
-            )
-        if S is not None:
-            assert (
-                len(S.size()) == 4
-            ), "Segmentation output should have 4 " "dimensions (NCHW), but has size {}".format(
-                S.size()
-            )
-            assert len(S) == len(I), (
-                "Number of output segmentation planes {} "
-                "should be equal to the number of output part index "
-                "planes {}".format(len(S), len(I))
-            )
-
-            assert S.size()[2:] == I.size()[2:], (
-                "Output segmentation plane size {} "
-                "should be equal to the output part index "
-                "plane size {}".format(S.size()[2:], I.size()[2:])
-            )
+    def _check_output_dims(self, S, I, U, V):
+        assert (
+            len(S.size()) == 4
+        ), "Segmentation output should have 4 " "dimensions (NCHW), but has size {}".format(
+            S.size()
+        )
         assert (
             len(I.size()) == 4
         ), "Segmentation output should have 4 " "dimensions (NCHW), but has size {}".format(
@@ -244,7 +224,16 @@ class DensePoseOutput(object):
         ), "Segmentation output should have 4 " "dimensions (NCHW), but has size {}".format(
             S.size()
         )
-
+        assert len(S) == len(I), (
+            "Number of output segmentation planes {} "
+            "should be equal to the number of output part index "
+            "planes {}".format(len(S), len(I))
+        )
+        assert S.size()[2:] == I.size()[2:], (
+            "Output segmentation plane size {} "
+            "should be equal to the output part index "
+            "plane size {}".format(S.size()[2:], I.size()[2:])
+        )
         assert I.size() == U.size(), (
             "Part index output shape {} "
             "should be the same as U coordinates output shape {}".format(I.size(), U.size())
@@ -336,25 +325,21 @@ class DensePoseOutput(object):
         Convert DensePose outputs to results format. Results are more compact,
         but cannot be resampled any more
         """
-        result = DensePoseResult(boxes_xywh, self.S, self.I, self.U, self.V, self.M)
+        result = DensePoseResult(boxes_xywh, self.S, self.I, self.U, self.V)
         return result
 
     def __getitem__(self, item):
         if isinstance(item, int):
-
-            S_selected = self.S[item].unsqueeze(0) if self.S is not None else None
+            S_selected = self.S[item].unsqueeze(0)
             I_selected = self.I[item].unsqueeze(0)
             U_selected = self.U[item].unsqueeze(0)
             V_selected = self.V[item].unsqueeze(0)
-            M_selected = self.M[item].unsqueeze(0) if self.M is not None else None
         else:
-
-            S_selected = self.S[item] if self.S is not None else None
+            S_selected = self.S[item]
             I_selected = self.I[item]
             U_selected = self.U[item]
             V_selected = self.V[item]
-            M_selected = self.M[item] if self.M is not None else None
-        return DensePoseOutput(S_selected, I_selected, U_selected, V_selected, M_selected)
+        return DensePoseOutput(S_selected, I_selected, U_selected, V_selected)
 
     def __str__(self):
         s = "DensePoseOutput S {}, I {}, U {}, V {}".format(
@@ -363,19 +348,17 @@ class DensePoseOutput(object):
         return s
 
     def __len__(self):
-        return self.I.size(0)
+        return self.S.size(0)
 
 
 class DensePoseResult(object):
-    def __init__(self, boxes_xywh, S, I, U, V, M):
+    def __init__(self, boxes_xywh, S, I, U, V):
         self.results = []
         self.boxes_xywh = boxes_xywh.cpu().tolist()
         assert len(boxes_xywh.size()) == 2
         assert boxes_xywh.size(1) == 4
         for i, box_xywh in enumerate(boxes_xywh):
-            est_S = S[[i]] if S is not None else None
-            est_M = M[[i]] if M is not None else None
-            result_i = self._output_to_result(box_xywh, est_S, I[[i]], U[[i]], V[[i]], est_M)
+            result_i = self._output_to_result(box_xywh, S[[i]], I[[i]], U[[i]], V[[i]])
             result_numpy_i = result_i.cpu().numpy()
             result_encoded_i = DensePoseResult.encode_png_data(result_numpy_i)
             result_encoded_with_shape_i = (result_numpy_i.shape, result_encoded_i)
@@ -387,40 +370,22 @@ class DensePoseResult(object):
         )
         return s
 
-    def _output_to_result(self, box_xywh, S, I, U, V, M=None):
+    def _output_to_result(self, box_xywh, S, I, U, V):
         x, y, w, h = box_xywh
         w = max(int(w), 1)
         h = max(int(h), 1)
         result = torch.zeros([3, h, w], dtype=torch.uint8, device=U.device)
-        assert (S is not None or M is not None),"Both AnnIndex tensor and BodyMask tensor are None!"
-        if S is not None:
-            assert (
-                len(S.size()) == 4
-            ), "AnnIndex tensor size should have {} " "dimensions but has {}".format(4, len(S.size()))
-            s_bbox = F.interpolate(S, (h, w), mode="bilinear", align_corners=False).argmax(dim=1)
-
-        if M is not None:
-            assert (
-                    len(I.size()) == 4
-            ), "Mask tensor size should have {} " "dimensions but has {}".format(4, len(M.size()))
-            m_bbox = F.interpolate(M, (h, w), mode="bilinear", align_corners=False)
-            m_score_bbox = F.softmax(m_bbox,dim=1)
-            m_bbox = m_bbox.argmax(dim=1)
-
-
+        assert (
+            len(S.size()) == 4
+        ), "AnnIndex tensor size should have {} " "dimensions but has {}".format(4, len(S.size()))
+        s_bbox = F.interpolate(S, (h, w), mode="bilinear", align_corners=False).argmax(dim=1)
         assert (
             len(I.size()) == 4
         ), "IndexUV tensor size should have {} " "dimensions but has {}".format(4, len(S.size()))
-        if M is None:
-            i_bbox = (
-                F.interpolate(I, (h, w), mode="bilinear", align_corners=False).argmax(dim=1)
-                * (s_bbox > 0).long()
-            ).squeeze(0)
-        else:
-            i_bbox = (
-                    F.interpolate(I, (h, w), mode="bilinear", align_corners=False).argmax(dim=1)
-                    * (m_score_bbox[:, 1] > 0.3).long()
-            ).squeeze(0)
+        i_bbox = (
+            F.interpolate(I, (h, w), mode="bilinear", align_corners=False).argmax(dim=1)
+            * (s_bbox > 0).long()
+        ).squeeze(0)
         assert len(U.size()) == 4, "U tensor size should have {} " "dimensions but has {}".format(
             4, len(U.size())
         )

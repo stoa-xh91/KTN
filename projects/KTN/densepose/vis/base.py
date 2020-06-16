@@ -101,7 +101,7 @@ class PointsVisualizer(object):
 
     _COLOR_GREEN = (18, 127, 15)
 
-    def __init__(self, color_bgr=_COLOR_GREEN, r=5):
+    def __init__(self, color_bgr=_COLOR_GREEN, r=3):
         self.color_bgr = color_bgr
         self.r = r
 

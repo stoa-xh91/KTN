@@ -11,13 +11,13 @@ import torch
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import read_image
 from detectron2.engine.defaults import DefaultPredictor
+from detectron2.structures.boxes import BoxMode
 from detectron2.structures.instances import Instances
 from detectron2.utils.logger import setup_logger
 
-
 from densepose import add_densepose_config
 from densepose.utils.logger import verbosity_to_level
-from densepose.vis.base import CompoundVisualizer,KeypointsVisualizer
+from densepose.vis.base import CompoundVisualizer
 from densepose.vis.bounding_box import ScoredBoundingBoxVisualizer
 from densepose.vis.densepose import (
     DensePoseResultsContourVisualizer,
@@ -26,7 +26,7 @@ from densepose.vis.densepose import (
     DensePoseResultsVVisualizer,
 )
 from densepose.vis.extractor import CompoundExtractor, create_extractor
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 DOC = """Apply Net - a tool to print / visualize DensePose results
 """
 
@@ -60,9 +60,9 @@ class InferenceAction(Action):
     @classmethod
     def add_arguments(cls: type, parser: argparse.ArgumentParser):
         super(InferenceAction, cls).add_arguments(parser)
-        parser.add_argument("--cfg", default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/configs/densepose_SemSegAMA_IA_3xDeConv_kpt_R_50_FPN_s3x.yaml",required=False, metavar="<config>", help="Config file")
-        parser.add_argument("--model",default="/home/wangxuanhan/research/project/detectron2-master/coco_exps/DensePose_ResNet50_AMAATT_SMFPN_IA_3xDeconv_kpt_Net_3lx/model_final.pth", required=False, metavar="<model>", help="Model file")
-        parser.add_argument("--input",default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/vis_miniset/*.jpg",required=False, metavar="<input>", help="Input data")
+        parser.add_argument("cfg", metavar="<config>", help="Config file")
+        parser.add_argument("model", metavar="<model>", help="Model file")
+        parser.add_argument("input", metavar="<input>", help="Input data")
 
     @classmethod
     def execute(cls: type, args: argparse.Namespace):
@@ -72,7 +72,6 @@ class InferenceAction(Action):
         logger.info(f"Loading model from {args.model}")
         predictor = DefaultPredictor(cfg)
         logger.info(f"Loading data from {args.input}")
-        # print('input:',args.input)
         file_list = cls._get_input_file_list(args.input)
         if len(file_list) == 0:
             logger.warning(f"No input images for {args.input}")
@@ -102,7 +101,7 @@ class InferenceAction(Action):
     def _get_input_file_list(cls: type, input_spec: str):
         if os.path.isdir(input_spec):
             file_list = [
-                fname
+                os.path.join(input_spec, fname)
                 for fname in os.listdir(input_spec)
                 if os.path.isfile(os.path.join(input_spec, fname))
             ]
@@ -143,8 +142,17 @@ class DumpAction(InferenceAction):
     ):
         image_fpath = entry["file_name"]
         logger.info(f"Processing {image_fpath}")
-        entry["instances"] = outputs
-        context["results"].append(entry)
+        result = {"file_name": image_fpath}
+        if outputs.has("scores"):
+            result["scores"] = outputs.get("scores").cpu()
+        if outputs.has("pred_boxes"):
+            result["pred_boxes_XYXY"] = outputs.get("pred_boxes").tensor.cpu()
+            if outputs.has("pred_densepose"):
+                boxes_XYWH = BoxMode.convert(
+                    result["pred_boxes_XYXY"], BoxMode.XYXY_ABS, BoxMode.XYWH_ABS
+                )
+                result["pred_densepose"] = outputs.get("pred_densepose").to_result(boxes_XYWH)
+        context["results"].append(result)
 
     @classmethod
     def create_context(cls: type, args: argparse.Namespace):
@@ -175,7 +183,6 @@ class ShowAction(InferenceAction):
         "dp_u": DensePoseResultsUVisualizer,
         "dp_v": DensePoseResultsVVisualizer,
         "bbox": ScoredBoundingBoxVisualizer,
-        "kps": KeypointsVisualizer,
     }
 
     @classmethod
@@ -188,9 +195,7 @@ class ShowAction(InferenceAction):
     def add_arguments(cls: type, parser: argparse.ArgumentParser):
         super(ShowAction, cls).add_arguments(parser)
         parser.add_argument(
-            "--visualizations",
-            default="dp_contour",
-            required=False,
+            "visualizations",
             metavar="<visualizations>",
             help="Comma separated list of visualizations, possible values: "
             "[{}]".format(",".join(sorted(cls.VISUALIZERS.keys()))),
@@ -198,7 +203,7 @@ class ShowAction(InferenceAction):
         parser.add_argument(
             "--min_score",
             metavar="<score>",
-            default=0.65,
+            default=0.8,
             type=float,
             help="Minimum detection score to visualize",
         )
@@ -208,8 +213,7 @@ class ShowAction(InferenceAction):
         parser.add_argument(
             "--output",
             metavar="<image_file>",
-            # default="outputres.png",
-            default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/vis_dp",
+            default="outputres.png",
             help="File name to save output to",
         )
 
@@ -235,17 +239,13 @@ class ShowAction(InferenceAction):
         visualizer = context["visualizer"]
         extractor = context["extractor"]
         image_fpath = entry["file_name"]
-        image_name, ext = os.path.splitext(os.path.basename(image_fpath))
         logger.info(f"Processing {image_fpath}")
-        # image = cv2.cvtColor(entry["image"], cv2.COLOR_BGR2GRAY)
-        image = entry["image"].copy()
-        # image = np.tile(image[:, :, np.newaxis], [1, 1, 3])
+        image = cv2.cvtColor(entry["image"], cv2.COLOR_BGR2GRAY)
+        image = np.tile(image[:, :, np.newaxis], [1, 1, 3])
         data = extractor(outputs)
         image_vis = visualizer.visualize(image, data)
         entry_idx = context["entry_idx"] + 1
-
-        # out_fname = cls._get_out_fname(entry_idx, context["out_fname"])
-        out_fname = cls._get_vis_out_fname(image_name, entry_idx, context["out_fname"])
+        out_fname = cls._get_out_fname(entry_idx, context["out_fname"])
         out_dir = os.path.dirname(out_fname)
         if len(out_dir) > 0 and not os.path.exists(out_dir):
             os.makedirs(out_dir)
@@ -262,10 +262,6 @@ class ShowAction(InferenceAction):
         base, ext = os.path.splitext(fname_base)
         return base + ".{0:04d}".format(entry_idx) + ext
 
-    @classmethod
-    def _get_vis_out_fname(cls: type, fname: str, entry_idx: int, out_dir: str, ext='.jpg'):
-
-        return os.path.join(out_dir, fname + "_{0:04d}".format(entry_idx) + ext)
     @classmethod
     def create_context(cls: type, args: argparse.Namespace) -> Dict[str, Any]:
         vis_specs = args.visualizations.split(",")

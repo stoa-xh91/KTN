@@ -60,8 +60,8 @@ class InferenceAction(Action):
     @classmethod
     def add_arguments(cls: type, parser: argparse.ArgumentParser):
         super(InferenceAction, cls).add_arguments(parser)
-        parser.add_argument("--cfg", default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/configs/densepose_SemSegAMA_IA_3xDeConv_kpt_R_50_FPN_s3x.yaml",required=False, metavar="<config>", help="Config file")
-        parser.add_argument("--model",default="/home/wangxuanhan/research/project/detectron2-master/coco_exps/DensePose_ResNet50_AMAATT_SMFPN_IA_3xDeconv_kpt_Net_3lx/model_final.pth", required=False, metavar="<model>", help="Model file")
+        parser.add_argument("--cfg", default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/configs/densepose_R_50_FPN_MID_Kpt_Weight_Transfer_net_s1x.yaml",required=False, metavar="<config>", help="Config file")
+        parser.add_argument("--model",default="/home/wangxuanhan/research/project/detectron2-master/coco_dp_exps/DensePose_ResNet50_MID_Kpt_Transfer_Net_1lx/model_final.pth", required=False, metavar="<model>", help="Model file")
         parser.add_argument("--input",default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/vis_miniset/*.jpg",required=False, metavar="<input>", help="Input data")
 
     @classmethod
@@ -189,7 +189,7 @@ class ShowAction(InferenceAction):
         super(ShowAction, cls).add_arguments(parser)
         parser.add_argument(
             "--visualizations",
-            default="dp_contour",
+            default="bbox",
             required=False,
             metavar="<visualizations>",
             help="Comma separated list of visualizations, possible values: "
@@ -209,7 +209,7 @@ class ShowAction(InferenceAction):
             "--output",
             metavar="<image_file>",
             # default="outputres.png",
-            default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/vis_dp",
+            default="/home/wangxuanhan/research/project/detectron2-master/projects/DensePose/vis_bbox",
             help="File name to save output to",
         )
 

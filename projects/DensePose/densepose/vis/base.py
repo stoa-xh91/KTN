@@ -3,18 +3,11 @@ import logging
 import numpy as np
 import cv2
 import torch
-import matplotlib.pyplot as plt
-from detectron2.data.datasets.builtin_meta import _get_builtin_metadata
+
 Image = np.ndarray
 Boxes = torch.Tensor
 
-_SMALL_OBJECT_AREA_THRESH = 1000
-_LARGE_MASK_AREA_THRESH = 120000
-_OFF_WHITE = (1.0, 1.0, 240.0 / 255)
-_BLACK = (0, 0, 0)
-_RED = (1.0, 0, 0)
 
-_KEYPOINT_THRESHOLD = 0.05
 class MatrixVisualizer(object):
     """
     Base visualizer for matrix data
@@ -176,73 +169,6 @@ class TextVisualizer(object):
             txt, self.font_face, self.font_scale, self.font_line_thickness
         )
         return txt_w, txt_h
-
-class KeypointsVisualizer(object):
-
-    _COLOR_GREEN = (18, 127, 15)
-
-    def __init__(self, color_bgr=_COLOR_GREEN, r=5):
-        self.color_bgr = color_bgr
-        self.r = r
-        self.metadata = _get_builtin_metadata("coco_person")
-        # Convert from plt 0-1 RGBA colors to 0-255 BGR colors for opencv.
-        cmap = plt.get_cmap('rainbow')
-        colors = [cmap(i) for i in np.linspace(0, 1, len(self.metadata['keypoint_connection_rules']) + 2)]
-        self.colors = [(c[2] * 255, c[1] * 255, c[0] * 255) for c in colors]
-    def visualize(self, image_bgr, keypoints, radius=3):
-
-        for idx, keypoints_per_instance in enumerate(keypoints):
-            visible = {}
-            for idx, keypoint in enumerate(keypoints_per_instance):
-                # draw keypoint
-                x, y, prob = keypoint
-                x = int(x)
-                y = int(y)
-                if prob > _KEYPOINT_THRESHOLD:
-                    keypoint_name = self.metadata['keypoint_names'][idx]
-                    # color = tuple(x / 255 for x in _BLACK)
-                    # color = self.colors[idx]
-                    # cv2.circle(image_bgr, (x, y), radius, color, -1)
-
-                    visible[keypoint_name] = (x, y)
-            idx_to_conn = 0
-            for kp0, kp1, color in self.metadata['keypoint_connection_rules']:
-                # draw limbs
-                color = self.colors[idx_to_conn]
-
-                if kp0 in visible and kp1 in visible:
-                    x0, y0 = visible[kp0]
-                    x1, y1 = visible[kp1]
-                    # color = tuple(x / 255.0 for x in color)
-                    cv2.line(image_bgr, (x0, y0), (x1, y1), color=color, thickness=2, lineType=cv2.LINE_AA)
-                if kp0 in visible:
-                    x0, y0 = visible[kp0]
-                    cv2.circle(image_bgr, (x0, y0), radius, color, -1)
-                if kp1 in visible:
-                    x1, y1 = visible[kp1]
-                    cv2.circle(image_bgr, (x1, y1), radius, color, -1)
-                idx_to_conn += 1
-            try:
-                ls_x, ls_y = visible["left_shoulder"]
-                rs_x, rs_y = visible["right_shoulder"]
-                mid_shoulder_x, mid_shoulder_y = (ls_x + rs_x) // 2, (ls_y + rs_y) // 2
-            except KeyError:
-                pass
-            else:
-                # draw line from nose to mid-shoulder
-                nose_x, nose_y = visible.get("nose", (None, None))
-                if nose_x is not None:
-                    cv2.line(image_bgr, tuple((nose_x, nose_y)), tuple((mid_shoulder_x, mid_shoulder_y)), color=self.colors[-2],thickness=2, lineType=cv2.LINE_AA)
-                try:
-                    # draw line from mid-shoulder to mid-hip
-                    lh_x, lh_y = visible["left_hip"]
-                    rh_x, rh_y = visible["right_hip"]
-                except KeyError:
-                    pass
-                else:
-                    mid_hip_x, mid_hip_y = (lh_x + rh_x) // 2, (lh_y + rh_y) // 2
-                    cv2.line(image_bgr, tuple((mid_hip_x, mid_hip_y)), tuple((mid_shoulder_x, mid_shoulder_y)), color=self.colors[-1], thickness=2, lineType=cv2.LINE_AA)
-        return image_bgr
 
 
 class CompoundVisualizer(object):

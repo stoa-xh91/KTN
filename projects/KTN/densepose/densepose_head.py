@@ -7,7 +7,7 @@ from detectron2.layers import Conv2d, ConvTranspose2d, interpolate
 from detectron2.structures.boxes import matched_boxlist_iou
 from detectron2.utils.registry import Registry
 # import cv2
-# import fvcore.nn.weight_init as weight_init
+import fvcore.nn.weight_init as weight_init
 from .structures import DensePoseOutput
 from .nonlocal_helper import NONLocalBlock2D
 import pickle
@@ -17,6 +17,8 @@ ROI_DENSEPOSE_HEAD_REGISTRY = Registry("ROI_DENSEPOSE_HEAD")
 def initialize_module_params(module):
     for name, param in module.named_parameters():
         if 'deconv_p' in name and "norm" in name:
+            continue
+        if 'ASPP' in name and "norm" in name:
             continue
         if 'dp_sem_head' in name and "norm" in name:
 
@@ -104,7 +106,6 @@ class ASPPPooling(nn.Sequential):
         x = super(ASPPPooling, self).forward(x)
         return F.interpolate(x, size=size, mode="bilinear", align_corners=False)
 
-
 class ASPP(nn.Module):
     def __init__(self, in_channels, atrous_rates, out_channels):
         super(ASPP, self).__init__()
@@ -138,380 +139,7 @@ class ASPP(nn.Module):
             res.append(conv(x))
         res = torch.cat(res, dim=1)
         return self.project(res)
-@ROI_DENSEPOSE_HEAD_REGISTRY.register()
-class DensePoseDeepLabHead(nn.Module):
-    def __init__(self, cfg, input_channels):
-        super(DensePoseDeepLabHead, self).__init__()
-        # fmt: off
-        hidden_dim           = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_DIM
-        kernel_size          = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_KERNEL
-        norm                 = cfg.MODEL.ROI_DENSEPOSE_HEAD.DEEPLAB.NORM
-        self.n_stacked_convs = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_STACKED_CONVS
-        self.use_nonlocal    = cfg.MODEL.ROI_DENSEPOSE_HEAD.DEEPLAB.NONLOCAL_ON
-        # fmt: on
-        pad_size = kernel_size // 2
-        n_channels = input_channels
 
-        self.ASPP = ASPP(input_channels, [6, 12, 56], n_channels)  # 6, 12, 56
-        self.add_module("ASPP", self.ASPP)
-
-        if self.use_nonlocal:
-            self.NLBlock = NONLocalBlock2D(input_channels, bn_layer=True)
-            self.add_module("NLBlock", self.NLBlock)
-        # weight_init.c2_msra_fill(self.ASPP)
-
-        for i in range(self.n_stacked_convs):
-            norm_module = nn.GroupNorm(32, hidden_dim) if norm == "GN" else None
-            layer = Conv2d(
-                n_channels,
-                hidden_dim,
-                kernel_size,
-                stride=1,
-                padding=pad_size,
-                bias=not norm,
-                norm=norm_module,
-            )
-            # weight_init.c2_msra_fill(layer)
-            n_channels = hidden_dim
-            layer_name = self._get_layer_name(i)
-            self.add_module(layer_name, layer)
-        self.n_out_channels = hidden_dim
-        initialize_module_params(self)
-
-    def forward(self, features):
-        x0 = features
-        x = self.ASPP(x0)
-        if self.use_nonlocal:
-            x = self.NLBlock(x)
-        output = x
-        for i in range(self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
-            x = F.relu(x)
-            output = x
-        return output
-
-    def _get_layer_name(self, i):
-        layer_name = "body_conv_fcn{}".format(i + 1)
-        return layer_name
-@ROI_DENSEPOSE_HEAD_REGISTRY.register()
-class DensePosePIDHead(nn.Module):
-    def __init__(self, cfg, input_channels):
-        super(DensePosePIDHead, self).__init__()
-        # fmt: off
-        hidden_dim           = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_DIM
-        kernel_size          = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_KERNEL
-        self.n_stacked_convs = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_STACKED_CONVS
-        deconv_kernel_size = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECONV_KERNEL
-        # fmt: on
-        pad_size = kernel_size // 2
-        n_channels = input_channels
-        for i in range(self.n_stacked_convs):
-            layer = Conv2d(n_channels, hidden_dim, kernel_size, stride=1, padding=pad_size)
-            layer_name = self._get_layer_name(i)
-            self.add_module(layer_name, layer)
-            n_channels = hidden_dim
-        for i in range(2):
-            layer = ConvTranspose2d(
-                hidden_dim,
-                hidden_dim,
-                kernel_size=deconv_kernel_size,
-                stride=2,
-                padding=int(deconv_kernel_size / 2 - 1),
-            )
-            layer_name = self._get_deconv_layer_name(i, 'SM')
-            self.add_module(layer_name, layer)
-        for i in range(2):
-            layer = ConvTranspose2d(
-                hidden_dim,
-                hidden_dim,
-                kernel_size=deconv_kernel_size,
-                stride=2,
-                padding=int(deconv_kernel_size / 2 - 1),
-            )
-            layer_name = self._get_deconv_layer_name(i, 'IM')
-            self.add_module(layer_name, layer)
-        layer = Conv2d(hidden_dim*2, hidden_dim, 1, stride=1, padding=0)
-        self.i_emb_layer_name = 'instance_embedding_layer'
-        self.add_module(self.i_emb_layer_name, layer)
-        self.n_out_channels = n_channels
-        initialize_module_params(self)
-
-    def forward(self, features):
-        x = features
-        # S module
-        for i in range(self.n_stacked_convs // 2):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
-            x = F.relu(x)
-        inter_x = x
-        for i in range(2):
-            layer_name = self._get_deconv_layer_name(i, 'SM')
-            inter_x = getattr(self, layer_name)(inter_x)
-            inter_x = F.relu(inter_x)
-        # I module
-        for i in range(self.n_stacked_convs // 2, self.n_stacked_convs):
-            layer_name = self._get_layer_name(i)
-            x = getattr(self, layer_name)(x)
-            x = F.relu(x)
-        for i in range(2):
-            layer_name = self._get_deconv_layer_name(i, 'IM')
-            x = getattr(self, layer_name)(x)
-            x = F.relu(x)
-        output = torch.cat([inter_x, x], 1)
-        output = getattr(self, self.i_emb_layer_name)(output)
-        output = F.relu(output)
-        return output, inter_x
-
-    def _get_layer_name(self, i):
-        layer_name = "body_conv_fcn{}".format(i + 1)
-        return layer_name
-
-    def _get_deconv_layer_name(self,i, prefix=''):
-        layer_name = prefix + "body_deconv_fcn{}".format(i + 1)
-        return layer_name
-
-
-@ROI_DENSEPOSE_HEAD_REGISTRY.register()
-class DensePoseAMAHead(nn.Module):
-    def __init__(self, cfg, input_channels):
-        super(DensePoseAMAHead, self).__init__()
-        # fmt: off
-        self.dp_semseg_on = cfg.MODEL.ROI_DENSEPOSE_HEAD.SEMSEG_ON
-        hidden_dim           = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_DIM
-        kernel_size          = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_KERNEL
-        deconv_kernel_size = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECONV_KERNEL
-        self.n_stacked_convs = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_STACKED_CONVS
-        if self.dp_semseg_on:
-            self.scale_factors = [2, 4, 4, 8, 2]
-            # self.scale_factors = [2, 2, 2, 2, 2]
-        else:
-            self.scale_factors = [2, 4, 4, 8]
-        self.up_idx = [[2], [1,2], [1,2], [0,1,2]]
-        # self.up_idx = [[0], [1], [2], [3]]
-        self.up_modules = []
-        self.fcs = []
-        # num_levels = len(self.scale_factors)
-        # fmt: on
-        pad_size = kernel_size // 2
-        n_channels = input_channels
-        # self.nonlocal_module = NONLocalBlock2D(hidden_dim,hidden_dim,sub_sample=False,bn_layer=False)
-        for i in range(self.n_stacked_convs):
-            layer = Conv2d(n_channels, hidden_dim, kernel_size, stride=1, padding=pad_size)
-            layer_name = self._get_layer_name(i)
-            self.add_module(layer_name, layer)
-            n_channels = hidden_dim
-        self._add_devonve_modules(hidden_dim, deconv_kernel_size)
-        # for k in range(4):
-        #     tmp_ops = []
-        #     tmp_ops.append(
-        #         nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        #     )
-        #     # norm_module = nn.GroupNorm(32, hidden_dim)
-        #     conv = Conv2d(
-        #         hidden_dim,
-        #         hidden_dim,
-        #         kernel_size=3,
-        #         stride=1,
-        #         padding=1,
-        #         # bias=False,
-        #         # norm=norm_module,
-        #         activation=F.relu,
-        #     )
-        #     weight_init.c2_msra_fill(conv)
-        #     tmp_ops.append(conv)
-        #     self.up_modules.append(nn.Sequential(*tmp_ops))
-        #     self.add_module('deconv_p'+str(k+1), self.up_modules[-1])
-        # for k in range(3):
-        #     tmp_ops = []
-        #     tmp_ops.append(
-        #         nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        #     )
-        #     norm_module = nn.GroupNorm(32, hidden_dim)
-        #     conv = Conv2d(
-        #         hidden_dim,
-        #         hidden_dim,
-        #         kernel_size=3,
-        #         stride=1,
-        #         padding=1,
-        #         bias=False,
-        #         norm=norm_module,
-        #         activation=F.relu,
-        #     )
-        #     weight_init.c2_msra_fill(conv)
-        #
-        #     tmp_ops.append(conv)
-        #     deconv_p1 = nn.Sequential(*tmp_ops)
-        #     self.add_module('deconv_p' + str(k + 1), deconv_p1)
-        #     tmp_ops.append(deconv_p1)
-        #     self.up_modules.append(deconv_p1)
-        # AMA modules
-        # for k in range(4):
-        #     fc1 = nn.Linear(hidden_dim, hidden_dim)
-        #     self.add_module("fc1_levels_{}".format(k + 1), fc1)
-        #     fc2 = nn.Linear(hidden_dim, hidden_dim)
-        #     self.add_module("att_levels_{}".format(k + 1), fc2)
-        #     self.fcs.append([fc1, nn.ReLU(), fc2, nn.Sigmoid()])
-        # ama_conv_emb = Conv2d(hidden_dim, hidden_dim, 3, stride=1, padding=1)
-        # self.add_module('ama_conv_emb', ama_conv_emb)
-        # semseg modules
-        # if self.dp_semseg_on:
-        #     dp_sem_head = []
-        #     n_channels = cfg.MODEL.SEM_SEG_HEAD.CONVS_DIM * 4
-        #     for k in range(4):
-        #         # norm_module = nn.GroupNorm(32, hidden_dim)
-        #         conv = Conv2d(n_channels, hidden_dim, kernel_size,
-        #                       stride=1, padding=pad_size,
-        #                       # bias=False,
-        #                       # norm=norm_module,
-        #                       activation=F.relu)
-        #         dp_sem_head.append(conv)
-        #         # dp_sem_head.append(nn.ReLU())
-        #         n_channels = hidden_dim
-        #     # dp_sem_head.append(ConvTranspose2d(
-        #     #     hidden_dim,
-        #     #     hidden_dim,
-        #     #     kernel_size=deconv_kernel_size,
-        #     #     stride=2,
-        #     #     padding=int(deconv_kernel_size / 2 - 1),
-        #     # ))
-        #     # dp_sem_head.append(nn.ReLU())
-        #     dp_sem_head.append(
-        #         nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        #     )
-        #     # norm_module = nn.GroupNorm(32, hidden_dim)
-        #     conv = Conv2d(
-        #         hidden_dim,
-        #         hidden_dim,
-        #         kernel_size=3,
-        #         stride=1,
-        #         padding=1,
-        #         # bias=False,
-        #         # norm=norm_module,
-        #         activation=F.relu,
-        #     )
-        #     weight_init.c2_msra_fill(conv)
-        #     dp_sem_head.append(conv)
-        #     self.dp_sem_head = nn.Sequential(*dp_sem_head)
-        self._add_ama_modules(hidden_dim)
-        layer = Conv2d(hidden_dim*2, hidden_dim, 1, stride=1, padding=0)
-        self.i_emb_layer_name = 'instance_embedding_layer'
-        self.add_module(self.i_emb_layer_name+'1', layer)
-        # layer = Conv2d(hidden_dim, hidden_dim, 3, stride=1, padding=1)
-        # self.add_module(self.i_emb_layer_name+'2', layer)
-        self.n_out_channels = n_channels
-        # if self.dp_semseg_on:
-        #     self.n_out_channels += n_channels
-        # gaussian_initialize_module_params(self)
-        initialize_module_params(self)
-    def _add_devonve_modules(self, hidden_dim, deconv_kernel_size):
-
-        for k in range(3):
-            tmp_ops = []
-            deconv = ConvTranspose2d(
-                hidden_dim,
-                hidden_dim,
-                kernel_size=deconv_kernel_size,
-                stride=2,
-                padding=int(deconv_kernel_size / 2 - 1),
-            )
-            tmp_ops.append(deconv)
-            tmp_ops.append(nn.ReLU())
-            deconv_p1 = nn.Sequential(*tmp_ops)
-            self.add_module('deconv_p' + str(k + 1), deconv_p1)
-            tmp_ops.append(deconv_p1)
-            self.up_modules.append(deconv_p1)
-    def _add_ama_modules(self, hidden_dim):
-
-        for k in range(4):
-            fc1 = nn.Linear(hidden_dim, hidden_dim)
-            self.add_module("fc1_levels_{}".format(k + 1), fc1)
-            fc2 = nn.Linear(hidden_dim, hidden_dim)
-            self.add_module("att_levels_{}".format(k + 1), fc2)
-            self.fcs.append([fc1, nn.ReLU(), fc2, nn.Sigmoid()])
-        ama_conv_emb = Conv2d(hidden_dim*4, hidden_dim, 3, stride=1, padding=1)
-        self.add_module('ama_static_conv_emb', ama_conv_emb)
-        ama_conv_emb = Conv2d(hidden_dim, hidden_dim, 3, stride=1, padding=1)
-        self.add_module('ama_dynamic_conv_emb', ama_conv_emb)
-
-    def _ama_module_forward(self, features):
-        assert len(features) > 0, 'invalid inputs for ama module'
-        # static aggregation
-        static_out_features = torch.cat(features, 1)
-        static_out_features = getattr(self, 'ama_static_conv_emb')(static_out_features)
-        static_out_features = F.relu(static_out_features)
-
-        for i in range(len(features)):
-            i_latent_feaure = torch.mean(features[i], [2, 3])
-            i_latent_output = torch.flatten(i_latent_feaure, start_dim=1)
-            for layer in self.fcs[i]:
-                i_latent_output = layer(i_latent_output)
-            features[i] = features[i] * (i_latent_output.unsqueeze(2).unsqueeze(3))
-            if i == 0:
-                out_features = features[i]
-            else:
-                out_features = out_features + features[i]
-        # out_features = torch.cat(features, 1)
-        out_features = getattr(self, 'ama_dynamic_conv_emb')(out_features)
-        out_features = F.relu(out_features)
-        out_features = torch.cat([static_out_features, out_features], 1)
-        return out_features
-    def _ama_upsample_forward(self, features):
-        for i in range(len(features)):
-            for j in range(len(self.up_idx[i])):
-                features[i] = self.up_modules[self.up_idx[i][j]](features[i])
-        return features
-
-    def forward(self, features, segm_features=None, forward_type='dp'):
-
-        if forward_type == 'kp':
-            x = features
-            for j in range(self.n_stacked_convs):
-                layer_name = self._get_layer_name(j)
-                x = getattr(self, layer_name)(x)
-                x = F.relu(x)
-                return x
-        # Multi Path
-        lower_multi_roi_features = []
-        for i in range(len(features)):
-            x = features[i]
-            for j in range(self.n_stacked_convs):
-                layer_name = self._get_layer_name(j)
-                x = getattr(self, layer_name)(x)
-                x = F.relu(x)
-            # x = self.nonlocal_module(x)
-            lower_multi_roi_features.append(x)
-
-        # for i in range(len(multi_roi_features)):
-        #     multi_roi_features[i] = interpolate(
-        #         multi_roi_features[i], scale_factor=self.scale_factors[i], mode="bilinear", align_corners=False
-        #     )
-        multi_roi_features = self._ama_upsample_forward(lower_multi_roi_features)
-        # output = torch.cat(multi_roi_features, 1)
-        output = self._ama_module_forward(multi_roi_features)
-        if segm_features is not None:
-            segm_x = segm_features
-            segm_x = self.dp_sem_head(segm_x)
-            # for j in range(self.n_stacked_convs):
-            #     layer_name = self._get_layer_name(j)
-            #     segm_x = getattr(self, layer_name)(segm_x)
-            #     segm_x = F.relu(segm_x)
-            # segm_x = interpolate(
-            #     segm_x, scale_factor=self.scale_factors[-1], mode="bilinear", align_corners=False
-            # )
-            output = torch.cat([output, segm_x], 1)
-        for i in range(1):
-            output = getattr(self, self.i_emb_layer_name+str(i+1))(output)
-            output = F.relu(output)
-        return output, multi_roi_features
-
-    def _get_layer_name(self, i):
-        layer_name = "body_conv_fcn{}".format(i + 1)
-        return layer_name
-
-    def _get_deconv_layer_name(self,i, prefix=''):
-        layer_name = prefix + "body_deconv_fcn{}".format(i + 1)
-        return layer_name
 @ROI_DENSEPOSE_HEAD_REGISTRY.register()
 class DensePosePredictor(nn.Module):
 
@@ -715,9 +343,13 @@ class DensePoseKptRelationPredictorV1(nn.Module):
             np_kpt_bias = torch.FloatTensor(kpt_weight['kpt_bias'])
             self.body_kpt_weight = Parameter(data=np_kpt_weight, requires_grad=True)
             self.body_kpt_bias = Parameter(data=np_kpt_bias, requires_grad=True)
-            self.kpt_surface_transfer_matrix = Parameter(torch.Tensor(
-                dim_out_patches, cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS))
+            # self.kpt_surface_transfer_matrix = Parameter(torch.Tensor(
+            #     dim_out_patches, cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS))
             sim_matrix_dir = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_SURF_RELATION_DIR
+            rel_matrix = pickle.load(open(sim_matrix_dir, 'rb'))
+            rel_matrix = rel_matrix.transpose()
+            rel_matrix = torch.FloatTensor(rel_matrix)
+            self.kpt_surface_transfer_matrix = nn.Parameter(data=rel_matrix, requires_grad=True)
 
         self.scale_factor = cfg.MODEL.ROI_DENSEPOSE_HEAD.UP_SCALE
         initialize_module_params(self)
@@ -832,6 +464,85 @@ class DensePoseKptRelationPredictorV2(nn.Module):
             k = k_lowres
         return (ann_index, index_uv, u, v, m, k), (ann_index_lowres, index_uv_lowres, u_lowres, v_lowres, m, k_lowres)
 @ROI_DENSEPOSE_HEAD_REGISTRY.register()
+class DensePoseKptRelationPredictorV3(nn.Module):
+
+    NUM_ANN_INDICES = 15
+
+    def __init__(self, cfg, input_channels):
+        super(DensePoseKptRelationPredictorV3, self).__init__()
+        dim_in = input_channels
+        self.dp_keypoints_on = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_ON
+        dim_out_ann_index = self.NUM_ANN_INDICES
+        dim_out_patches = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_PATCHES + 1
+        kernel_size = cfg.MODEL.ROI_DENSEPOSE_HEAD.DECONV_KERNEL
+        self.UP_SCALE = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_UP_SCALE
+        self.kernel_size = kernel_size
+        self.ann_index_lowres = ConvTranspose2d(
+            dim_in, dim_out_ann_index, kernel_size, stride=2, padding=int(kernel_size / 2 - 1)
+        )
+        self.u_lowres = ConvTranspose2d(
+            dim_in, dim_out_patches, kernel_size, stride=2, padding=int(kernel_size / 2 - 1)
+        )
+        self.v_lowres = ConvTranspose2d(
+            dim_in, dim_out_patches, kernel_size, stride=2, padding=int(kernel_size / 2 - 1)
+        )
+        if self.dp_keypoints_on:
+            kpt_weight_dir = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_CLASSIFIER_WEIGHT_DIR
+            kpt_weight = pickle.load(open(kpt_weight_dir, 'rb'))
+            np_kpt_weight = torch.FloatTensor(kpt_weight['kpt_weight'])
+            np_kpt_bias = torch.FloatTensor(kpt_weight['kpt_bias'])
+            self.body_kpt_weight = Parameter(data=np_kpt_weight, requires_grad=True)
+            self.body_kpt_bias = Parameter(data=np_kpt_bias, requires_grad=True)
+            sim_matrix_dir = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_SURF_RELATION_DIR
+            rel_matrix = pickle.load(open(sim_matrix_dir,'rb'))
+            rel_matrix = rel_matrix.transpose()
+            rel_matrix = torch.FloatTensor(rel_matrix)
+            self.kpt_surface_transfer_matrix = nn.Parameter(data=rel_matrix, requires_grad=True)
+            index_weight_size = dim_in * self.kernel_size * self.kernel_size
+            kpt_surface_transformer = []
+            kpt_surface_transformer.append(nn.Linear(index_weight_size, index_weight_size))
+            kpt_surface_transformer.append(nn.LeakyReLU(0.02))
+            kpt_surface_transformer.append(nn.Linear(index_weight_size, index_weight_size))
+            self.kpt_surface_transformer = nn.Sequential(*kpt_surface_transformer)
+
+        self.scale_factor = cfg.MODEL.ROI_DENSEPOSE_HEAD.UP_SCALE
+        initialize_module_params(self)
+
+    def generate_surface_weights_from_kpt(self):
+        kpt_weight = self.body_kpt_weight
+        n_in, n_out, h, w = kpt_weight.size(0), kpt_weight.size(1), kpt_weight.size(2), kpt_weight.size(3)
+        kpt_weight = kpt_weight.permute((1, 0, 2, 3)).reshape((n_out, n_in*h*w))
+        body_surface_weight = torch.matmul(self.kpt_surface_transfer_matrix, kpt_weight)
+        body_surface_weight = self.kpt_surface_transformer(body_surface_weight)
+        body_surface_weight = body_surface_weight.reshape((self.kpt_surface_transfer_matrix.size(0), n_in, h, w)).permute((1, 0, 2, 3))
+        return body_surface_weight
+    def forward(self, head_outputs):
+        ann_index_lowres = self.ann_index_lowres(head_outputs)
+        u_lowres = self.u_lowres(head_outputs)
+        v_lowres = self.v_lowres(head_outputs)
+        m_lowres = None #self.m_lowres(head_outputs)
+        k_lowres = nn.functional.conv_transpose2d(head_outputs, weight=self.body_kpt_weight, bias=self.body_kpt_bias,
+                                 padding=int(self.kernel_size / 2 - 1), stride=2)
+        body_surface_weight = self.generate_surface_weights_from_kpt()
+        index_uv_lowres = nn.functional.conv_transpose2d(head_outputs, weight=body_surface_weight,
+                                                          padding=int(self.kernel_size / 2 - 1), stride=2)
+        def interp2d(input):
+            return interpolate(
+                input, scale_factor=self.scale_factor, mode="bilinear", align_corners=False
+            )
+
+        ann_index = interp2d(ann_index_lowres)
+        index_uv = interp2d(index_uv_lowres)
+        u = interp2d(u_lowres)
+        v = interp2d(v_lowres)
+        m = None #interp2d(m_lowres)
+        if self.UP_SCALE == 2:
+            k = interp2d(k_lowres)
+        else:
+            k = k_lowres
+        return (ann_index, index_uv, u, v, m, k), (ann_index_lowres, index_uv_lowres, u_lowres, v_lowres, m, k_lowres)
+
+@ROI_DENSEPOSE_HEAD_REGISTRY.register()
 class DensePoseKptRelationPredictor(nn.Module):
 
     NUM_ANN_INDICES = 15
@@ -846,9 +557,6 @@ class DensePoseKptRelationPredictor(nn.Module):
         self.KPT_UP_SCALE = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_UP_SCALE
         self.kernel_size = kernel_size
 
-        # self.ann_index_lowres = ConvTranspose2d(
-        #     dim_in, dim_out_ann_index, kernel_size, stride=2, padding=int(kernel_size / 2 - 1)
-        # )
         self.u_lowres = ConvTranspose2d(
             dim_in, dim_out_patches, kernel_size, stride=2, padding=int(kernel_size / 2 - 1)
         )
@@ -869,7 +577,7 @@ class DensePoseKptRelationPredictor(nn.Module):
             rel_matrix = pickle.load(open(sim_matrix_dir, 'rb'))
             rel_matrix = rel_matrix.transpose()
             rel_matrix = torch.FloatTensor(rel_matrix)
-            self.kpt_surface_transfer_matrix = nn.Parameter(data=rel_matrix, requires_grad=False)
+            self.kpt_surface_transfer_matrix = nn.Parameter(data=rel_matrix, requires_grad=True)
             # self.kpt_surface_transfer_matrix = Parameter(torch.Tensor(
             #     dim_out_patches, cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS))
             index_weight_size = dim_in * self.kernel_size * self.kernel_size
@@ -927,352 +635,6 @@ class DensePoseKptRelationPredictor(nn.Module):
             k = k_lowres
         return (ann_index, index_uv, u, v, m, k), (ann_index_lowres, index_uv_lowres, u_lowres, v_lowres, m, k_lowres)
 
-@ROI_DENSEPOSE_HEAD_REGISTRY.register()
-class DensePosePredictorV2(nn.Module):
-
-    NUM_ANN_INDICES = 15
-
-    def __init__(self, cfg, input_channels):
-        super(DensePosePredictorV2, self).__init__()
-        dim_in = input_channels
-        dim_out_ann_index = self.NUM_ANN_INDICES
-        dim_out_patches = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_PATCHES + 1
-        # self.segm_emb_layer = Conv2d(dim_in, dim_in, 3, stride=1, padding=1)
-        self.dp_emb_layer = Conv2d(dim_in, dim_in, 3, stride=1, padding=1)
-
-        self.ann_index_layer = Conv2d(dim_in, dim_out_ann_index, 3, stride=1, padding=1)
-        self.index_uv_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.u_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.v_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.m_layer = Conv2d(dim_in, 2, 3, stride=1, padding=1)
-        #
-        self.inter_m_layer = Conv2d(dim_in, 2, 3, stride=1, padding=1)
-        # self.inter_ann_index_layer = Conv2d(dim_in, dim_out_ann_index, 3, stride=1, padding=1)
-        # self.inter_index_uv_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        # self.inter_u_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        # self.inter_v_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-
-        initialize_module_params(self)
-
-    def forward(self, head_outputs, inter_outputs):
-        # inter_ann_index = self.inter_ann_index_layer(inter_outputs)
-        # inter_index_uv = self.inter_index_uv_layer(inter_outputs)
-        # inter_u = self.inter_u_layer(inter_outputs)
-        # inter_v = self.inter_v_layer(inter_outputs)
-        inter_m = self.inter_m_layer(inter_outputs)
-
-        # seg_emb = self.dp_emb_layer(head_outputs)
-        dp_emb = self.dp_emb_layer(head_outputs)
-        dp_emb = F.relu(dp_emb)
-        ann_index = self.ann_index_layer(dp_emb)
-        index_uv = self.index_uv_layer(dp_emb)
-        u = self.u_layer(dp_emb)
-        v = self.v_layer(dp_emb)
-        m = self.m_layer(dp_emb)
-        return (ann_index, index_uv, u, v, m), inter_m #(inter_ann_index, inter_index_uv, inter_u, inter_v, inter_m)
-
-@ROI_DENSEPOSE_HEAD_REGISTRY.register()
-class _DensePoseAMAPredictor(nn.Module):
-
-    NUM_ANN_INDICES = 15
-
-    def __init__(self, cfg, input_channels):
-        super(DensePoseAMAPredictor, self).__init__()
-        self.dp_keypoints_on = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_ON
-        dim_in = input_channels
-        dim_out_ann_index = self.NUM_ANN_INDICES
-        dim_out_patches = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_PATCHES + 1
-        self.dp_emb_layer = Conv2d(dim_in, dim_in, 3, stride=1, padding=1)
-        # self.mask_emb_layer = Conv2d(dim_in, dim_in, 3, stride=1, padding=1)
-
-        self.ann_index_layer = Conv2d(dim_in, dim_out_ann_index, 3, stride=1, padding=1)
-        self.index_uv_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.u_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.v_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.m_layer = Conv2d(dim_in, 2, 3, stride=1, padding=1)
-        #
-        if self.dp_keypoints_on:
-            k_layer = []
-            # k_layer.append(Conv2d(dim_in, dim_in, 3, stride=1, padding=1))
-            # k_layer.append(nn.ReLU())
-            k_layer.append(Conv2d(dim_in, cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS, 3, stride=1, padding=1))
-            self.k_layer = nn.Sequential(*k_layer)
-        dim_in = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_DIM
-        for i in range(2):
-            layer = Conv2d(dim_in, dim_out_ann_index, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'ann_index')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'index_uv')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'u')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'v')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, 2, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'body_mask')
-            self.add_module(layer_name, layer)
-        gaussian_initialize_module_params(self)
-        # initialize_module_params(self)
-
-    def _get_layer_name(self, i,prefix=''):
-        layer_name = prefix+"_inter_body_conv_fcn{}".format(i + 1)
-        return layer_name
-    def generate_weights(self):
-        index_weight = self.index_uv_lowres.weight
-        n_in, n_out, h, w = index_weight.size(0), index_weight.size(1), index_weight.size(2), index_weight.size(3)
-        index_weight = torch.mean(index_weight,[2,3])
-        index_weight = index_weight.permute((1, 0)).reshape((n_out, n_in))
-        index_to_part_weight = self.part_weight_transformer(index_weight)
-        index_to_body_weight = self.body_weight_transformer(index_weight)
-        body_part_weight = torch.matmul(self.body_part_weight, index_to_part_weight)
-        body_part_weight = body_part_weight.reshape((self.NUM_ANN_INDICES, n_in, h, w)).permute((1, 0, 2, 3))
-        body_mask_weight = torch.matmul(self.body_mask_weight, index_to_body_weight)
-        body_mask_weight = body_mask_weight.reshape((2, n_in, h, w)).permute((1, 0, 2, 3))
-        return body_part_weight, body_mask_weight
-    def forward(self, head_outputs, inter_outputs):
-        assert len(inter_outputs) == 4 or len(inter_outputs) == 5, "invalid number of inter outputs"
-        inter_shallow_level_out = inter_outputs[0] + inter_outputs[1]
-        inter_deep_level_out = inter_outputs[2] + inter_outputs[3]
-        inter_features = [inter_shallow_level_out, inter_deep_level_out]
-        inter_out1 = []
-        inter_out2 = []
-        # inter outputs
-        for i in range(2):
-            if i == 0:
-                inter_out = inter_out1
-            else:
-                inter_out = inter_out2
-            layer_name = self._get_layer_name(i, 'ann_index')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'index_uv')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'u')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'v')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'body_mask')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-
-        dp_emb = self.dp_emb_layer(head_outputs)
-        dp_emb = F.relu(dp_emb)
-        # mask_emb = self.mask_emb_layer(head_outputs)
-        # mask_emb = F.relu(mask_emb)
-        ann_index = self.ann_index_layer(dp_emb)
-        index_uv = self.index_uv_layer(dp_emb)
-        u = self.u_layer(dp_emb)
-        v = self.v_layer(dp_emb)
-        m = self.m_layer(dp_emb)
-        if self.dp_keypoints_on:
-            k = self.k_layer(dp_emb)
-            return (ann_index, index_uv, u, v, m, k), inter_out1, inter_out2
-        return (ann_index, index_uv, u, v, m), inter_out1, inter_out2
-@ROI_DENSEPOSE_HEAD_REGISTRY.register()
-class DensePoseAMAPredictor(nn.Module):
-
-    NUM_ANN_INDICES = 15
-
-    def __init__(self, cfg, input_channels):
-        super(DensePoseAMAPredictor, self).__init__()
-        self.dp_keypoints_on = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_ON
-        dim_in = input_channels
-        dim_out_ann_index = self.NUM_ANN_INDICES
-        dim_out_patches = cfg.MODEL.ROI_DENSEPOSE_HEAD.NUM_PATCHES + 1
-        self.dp_emb_layer = Conv2d(dim_in, dim_in, 3, stride=1, padding=1)
-        # self.mask_emb_layer = Conv2d(dim_in, dim_in, 3, stride=1, padding=1)
-        self.kernel_size = 3
-        # self.body_part_weight = Parameter(torch.Tensor(
-        #     self.NUM_ANN_INDICES, dim_out_patches))
-        # self.body_mask_weight = Parameter(torch.Tensor(
-        #     2, dim_out_patches))
-        # self.body_surface_weight = Parameter(torch.Tensor(
-        #     dim_out_patches, self.NUM_ANN_INDICES))
-        # self.body_part_bias = Parameter(torch.Tensor(self.NUM_ANN_INDICES, dim_out_patches))
-        # self.body_mask_bias = Parameter(torch.Tensor(2, dim_out_patches), requires_grad=True)
-        # index_weight_size = dim_in * self.kernel_size * self.kernel_size
-        # part_weight_transformer = []
-        # body_weight_transformer = []
-        # part_weight_transformer.append(nn.Linear(dim_in, dim_in))
-        # part_weight_transformer.append(nn.LeakyReLU(0.02))
-        # part_weight_transformer.append(nn.Linear(dim_in, index_weight_size))
-        # part_weight_transformer.append(nn.LeakyReLU(0.02))
-        # body_weight_transformer.append(nn.Linear(dim_in, dim_in))
-        # body_weight_transformer.append(nn.LeakyReLU(0.02))
-        # body_weight_transformer.append(nn.Linear(dim_in, index_weight_size))
-        # body_weight_transformer.append(nn.LeakyReLU(0.02))
-        # self.part_weight_transformer = nn.Sequential(*part_weight_transformer)
-        # self.body_weight_transformer = nn.Sequential(*body_weight_transformer)
-
-        self.ann_index_layer = Conv2d(dim_in, dim_out_ann_index, 3, stride=1, padding=1)
-        # self.index_uv_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.u_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.v_layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-        self.m_layer = Conv2d(dim_in, 2, 3, stride=1, padding=1)
-        #
-        if self.dp_keypoints_on:
-            # k_layer = []
-            # # k_layer.append(Conv2d(dim_in, dim_in, 3, stride=1, padding=1))
-            # # k_layer.append(nn.ReLU())
-            # k_layer.append(Conv2d(dim_in, cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS, 3, stride=1, padding=1))
-            # self.k_layer = nn.Sequential(*k_layer)
-            kpt_weight_dir = cfg.MODEL.ROI_DENSEPOSE_HEAD.KPT_CLASSIFIER_WEIGHT_DIR
-            kpt_weight = pickle.load(open(kpt_weight_dir, 'rb'))
-            np_kpt_weight = torch.FloatTensor(kpt_weight['kpt_weight'])
-            np_kpt_bias = torch.FloatTensor(kpt_weight['kpt_bias'])
-            nb_kpt_emb_weight = torch.FloatTensor(kpt_weight['emb_weight'])
-            kpt_emb_weight = Parameter(data=nb_kpt_emb_weight, requires_grad=True)
-            nb_kpt_emb_bias = torch.FloatTensor(kpt_weight['emb_bias'])
-            kpt_emb_bias = Parameter(data=nb_kpt_emb_bias, requires_grad=True)
-            self.dp_emb_layer.weight = kpt_emb_weight
-            self.dp_emb_layer.bias = kpt_emb_bias
-            self.body_kpt_weight = Parameter(data=np_kpt_weight, requires_grad=True)
-            self.body_kpt_bias = Parameter(data=np_kpt_bias, requires_grad=True)
-            self.kpt_surface_transfer_matrix = Parameter(torch.Tensor(
-                dim_out_patches, cfg.MODEL.ROI_KEYPOINT_HEAD.NUM_KEYPOINTS))
-            index_weight_size = dim_in * self.kernel_size * self.kernel_size
-            kpt_surface_transformer = []
-            kpt_surface_transformer.append(nn.Linear(index_weight_size, index_weight_size))
-            kpt_surface_transformer.append(nn.LeakyReLU(0.02))
-            # kpt_surface_transformer2 = []
-            kpt_surface_transformer.append(nn.Linear(index_weight_size, index_weight_size))
-            # kpt_surface_transformer.append(nn.LeakyReLU(0.02))
-            self.kpt_surface_transformer = nn.Sequential(*kpt_surface_transformer)
-            # self.kpt_surface_transformer = nn.Sequential(*kpt_surface_transformer)
-        dim_in = cfg.MODEL.ROI_DENSEPOSE_HEAD.CONV_HEAD_DIM
-        for i in range(2):
-            layer = Conv2d(dim_in, dim_out_ann_index, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'ann_index')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'index_uv')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'u')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, dim_out_patches, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'v')
-            self.add_module(layer_name, layer)
-            layer = Conv2d(dim_in, 2, 3, stride=1, padding=1)
-            layer_name = self._get_layer_name(i, 'body_mask')
-            self.add_module(layer_name, layer)
-        # gaussian_initialize_module_params(self)
-        initialize_module_params(self)
-
-    def _get_layer_name(self, i,prefix=''):
-        layer_name = prefix+"_inter_body_conv_fcn{}".format(i + 1)
-        return layer_name
-    def generate_weights(self):
-        index_weight = self.index_uv_layer.weight
-        # index_bias = self.index_uv_layer.bias
-        n_out, n_in, h, w = index_weight.size(0), index_weight.size(1), index_weight.size(2), index_weight.size(3)
-        index_weight = index_weight.reshape((n_out, n_in*h*w))
-        # index_weight = torch.mean(index_weight,[2,3])
-        # index_weight = index_weight.reshape((n_out, n_in))
-        # index_to_part_weight = self.part_weight_transformer(index_weight)
-        # index_to_body_weight = self.body_weight_transformer(index_weight)
-        body_part_weight = torch.matmul(self.body_part_weight, index_weight)
-        body_part_weight = body_part_weight.reshape((self.NUM_ANN_INDICES, n_in, h, w))
-        # body_part_bias = torch.matmul(self.body_part_bias, index_bias)
-        body_mask_weight = torch.matmul(self.body_mask_weight, index_weight)
-        body_mask_weight = body_mask_weight.reshape((2, n_in, h, w))
-        # body_mask_bias = torch.matmul(self.body_mask_bias, index_bias)
-        # return (body_part_weight, body_part_bias), (body_mask_weight, body_mask_bias)
-        return body_part_weight, body_mask_weight
-    def generate_parts_weights(self):
-        index_weight = self.index_uv_layer.weight
-        # index_bias = self.index_uv_layer.bias
-        n_out, n_in, h, w = index_weight.size(0), index_weight.size(1), index_weight.size(2), index_weight.size(3)
-        index_weight = index_weight.reshape((n_out, n_in*h*w))
-        body_part_weight = torch.matmul(self.body_part_weight, index_weight)
-        body_part_weight = body_part_weight.reshape((self.NUM_ANN_INDICES, n_in, h, w))
-        return body_part_weight
-    def generate_surface_weights(self):
-        ann_index_weight = self.ann_index_layer.weight
-        # index_bias = self.index_uv_layer.bias
-        n_out, n_in, h, w = ann_index_weight.size(0), ann_index_weight.size(1), ann_index_weight.size(2), ann_index_weight.size(3)
-        ann_index_weight = ann_index_weight.reshape((n_out, n_in * h * w))
-        index_weight = torch.matmul(self.body_part_weight.permute(1,0), ann_index_weight)
-        index_weight = index_weight.reshape((self.body_part_weight.size(1), n_in, h, w))
-        return index_weight
-    def generate_surface_weights_from_kpt(self):
-        kpt_weight = self.body_kpt_weight
-        n_out, n_in, h, w = kpt_weight.size(0), kpt_weight.size(1), kpt_weight.size(2), kpt_weight.size(3)
-
-        kpt_weight = kpt_weight.reshape((n_out, n_in*h*w))
-        body_surface_weight = torch.matmul(self.kpt_surface_transfer_matrix, kpt_weight)
-        body_surface_weight = self.kpt_surface_transformer(body_surface_weight)
-        body_surface_weight = body_surface_weight.reshape((self.kpt_surface_transfer_matrix.size(0), n_in, h, w))
-        return body_surface_weight
-
-    def forward(self, head_outputs, inter_outputs):
-        assert len(inter_outputs) == 4 or len(inter_outputs) == 5, "invalid number of inter outputs"
-        inter_shallow_level_out = inter_outputs[0] + inter_outputs[1]
-        inter_deep_level_out = inter_outputs[2] + inter_outputs[3]
-        inter_features = [inter_shallow_level_out, inter_deep_level_out]
-        inter_out1 = []
-        inter_out2 = []
-        # inter outputs
-        for i in range(2):
-            if i == 0:
-                inter_out = inter_out1
-            else:
-                inter_out = inter_out2
-            layer_name = self._get_layer_name(i, 'ann_index')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'index_uv')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'u')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'v')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-            layer_name = self._get_layer_name(i, 'body_mask')
-            inter_ann_index = getattr(self, layer_name)(inter_features[i])
-            inter_out.append(inter_ann_index)
-
-        dp_emb = self.dp_emb_layer(head_outputs)
-        dp_emb = F.relu(dp_emb)
-
-        # index_uv = self.index_uv_layer(dp_emb)
-        u = self.u_layer(dp_emb)
-        v = self.v_layer(dp_emb)
-        m = self.m_layer(dp_emb)
-        ann_index = self.ann_index_layer(dp_emb)
-        k = nn.functional.conv2d(dp_emb, weight=self.body_kpt_weight, bias=self.body_kpt_bias,
-                                            padding=1, stride=1)
-        body_surface_weight = self.generate_surface_weights_from_kpt()
-        index_uv = nn.functional.conv2d(dp_emb, weight=body_surface_weight,
-                                 padding=1, stride=1)
-        # body_part_weight, body_mask_weight = self.generate_weights()
-        # body_part_weight = self.generate_parts_weights()
-        # body_surface_weight = self.generate_surface_weights()
-        # ann_index_hat = nn.functional.conv2d(dp_emb, weight=body_part_weight,
-        #                                  padding=1, stride=1)
-        # m = nn.functional.conv2d(dp_emb, weight=body_mask_weight,
-        #                          padding=1, stride=1)
-        # index_uv_hat = nn.functional.conv2d(dp_emb, weight=body_surface_weight,
-        #                          padding=1, stride=1)
-        # inter_out3 = [ann_index_hat, index_uv_hat, u, v, m]
-        # ann_index = (ann_index + ori_ann_index) / 2
-        # index_uv = (index_uv + ori_index_uv) / 2
-        # ann_index = nn.functional.conv2d(dp_emb, weight=body_part_weight[0],bias=body_part_weight[1],
-        #                                                   padding=1, stride=1)
-        # m = nn.functional.conv2d(dp_emb, weight=body_mask_weight[0],bias=body_mask_weight[1],
-        #                                           padding=1, stride=1)
-        # if self.dp_keypoints_on:
-        #     k = self.k_layer(dp_emb)
-        #     return (ann_index, index_uv, u, v, m, k), inter_out1, inter_out2
-        return (ann_index, index_uv, u, v, m, k), inter_out1, inter_out2
 class DensePoseKeypointsPredictor(nn.Module):
 
     def __init__(self, cfg, input_channels):
@@ -1371,25 +733,13 @@ def build_densepose_predictor(cfg, input_channels):
     predictor_name = cfg.MODEL.ROI_DENSEPOSE_HEAD.PREDICTOR
     return ROI_DENSEPOSE_HEAD_REGISTRY.get(predictor_name)(cfg, input_channels)
 
-def _build_densepose_predictor(cfg, input_channels):
-    if cfg.MODEL.ROI_DENSEPOSE_HEAD.NAME == 'DensePosePIDHead':
-        print('DensePose Predictor V2')
-        predictor = DensePosePredictorV2(cfg, input_channels)
-    elif cfg.MODEL.ROI_DENSEPOSE_HEAD.NAME == 'DensePoseAMAHead':
-        print('AMA DensePose Predictor')
-        predictor = DensePoseAMAPredictor(cfg, input_channels)
-    else:
-        # predictor = DensePosePredictor(cfg, input_channels)
-        predictor = DensePoseKptRelationPredictor(cfg, input_channels)
-    return predictor
-
 
 def build_densepose_data_filter(cfg):
     dp_filter = DensePoseDataFilter(cfg, cfg.MODEL.ROI_DENSEPOSE_HEAD.FG_IOU_THRESHOLD)
     return dp_filter
 
 
-def densepose_inference(densepose_outputs, detections):
+def densepose_inference(densepose_outputs, detections, thresh = 0.5):
     """
     Infer dense pose estimate based on outputs from the DensePose head
     and detections. The estimate for each detection instance is stored in its
@@ -1422,7 +772,7 @@ def densepose_inference(densepose_outputs, detections):
         u_i = u[k : k + n_i]
         v_i = v[k : k + n_i]
         m_i = m[k : k + n_i] if m is not None else m
-        densepose_output_i = DensePoseOutput(s_i, index_uv_i, u_i, v_i, m_i)
+        densepose_output_i = DensePoseOutput(s_i, index_uv_i, u_i, v_i, m_i, thresh)
         detection.pred_densepose = densepose_output_i
         k += n_i
 
@@ -1471,7 +821,6 @@ def _linear_interpolation_utilities(v_norm, v0_src, size_src, v0_dst, size_dst, 
     v_grid = torch.min(v_hi.float(), v_grid)
     v_w = v_grid - v_lo.float()
     return v_lo, v_hi, v_w, j_valid
-
 
 def _grid_sampling_utilities(
     zh, zw, bbox_xywh_est, bbox_xywh_gt, index_gt, x_norm, y_norm, index_bbox
@@ -1677,7 +1026,6 @@ def _extract_single_tensors_from_matches_one_image(
         i_with_dp,
     )
 
-
 def _extract_single_tensors_from_matches(proposals_with_targets):
     i_img = []
     i_gt_all = []
@@ -1792,9 +1140,6 @@ class DensePoseLosses(object):
                 losses[prefix+"loss_densepose_S"] = s.sum() * 0
             if m is not None:
                 losses[prefix+"loss_densepose_M"] = m.sum() * 0
-            if cls_emb_loss_on:
-                losses[prefix + 'loss_push'] = m.sum() * 0
-                losses[prefix + 'loss_pull'] = m.sum() * 0
             return losses
 
         zh = u.size(2)
@@ -1889,49 +1234,8 @@ class DensePoseLosses(object):
         if m is not None:
             m_loss = F.cross_entropy(m_est, m_gt.long()) * self.w_mask
             losses[prefix+"loss_densepose_M"] = m_loss
-        if cls_emb_loss_on:
-            emb_loss = class_emb_losses(m_est, m_gt)
-            losses[prefix + 'loss_push'], losses[prefix + 'loss_pull'] = emb_loss
         return losses
 
-
-def class_emb_losses(mask_emb, gt_labels):
-    keep = (torch.sum(gt_labels, (1, 2)) > 0)
-    keep_mask_emb = mask_emb[keep, :, :, :]
-    keep_labels = gt_labels[keep, :, :]
-    if keep_mask_emb.size(0) == 0 or torch.sum(keep).cpu().numpy() < 1:
-        return 0
-    keep_labels = keep_labels.clamp(min=0, max=1)
-    fg_emb = keep_mask_emb * (keep_labels == 1).unsqueeze(1)
-    fg_ref_emb = torch.sum(fg_emb,(2,3)) / torch.sum((keep_labels==1),(1,2)).unsqueeze(1)
-    bg_emb = keep_mask_emb * (keep_labels == 0).unsqueeze(1)
-    bg_ref_emb = torch.sum(bg_emb, (2, 3)) / torch.sum((keep_labels == 0), (1, 2)).unsqueeze(1)
-    ref_embs = torch.cat([fg_ref_emb, bg_ref_emb], 0)
-    labels = torch.cat([torch.ones((fg_ref_emb.size(0),)), torch.zeros(bg_ref_emb.size(0),)], 0)
-    labels = labels.cuda(non_blocking=True)
-    emb_loss = F.cross_entropy(ref_embs, labels.long()) * 0.5
-
-    # fg push & aggregation
-    '''
-    fg_dist = (keep_mask_emb - fg_ref_emb.reshape((fg_ref_emb.size(0), fg_ref_emb.size(1), 1, 1))) ** 2
-    fg_dist = torch.pow(torch.sum(fg_dist, 1), 0.5)
-    fg_dist_logits = 2 / (1 + torch.exp(fg_dist))
-    fg_dist_logits = fg_dist_logits.clamp(min=0, max=1)
-    fg_dist_loss = F.binary_cross_entropy(fg_dist_logits.reshape((-1)), keep_labels.reshape((-1)).float())
-    # bg push & aggregation
-    bg_dist = (keep_mask_emb - bg_ref_emb.reshape((bg_ref_emb.size(0), bg_ref_emb.size(1), 1, 1))) ** 2
-    bg_dist = torch.pow(torch.sum(bg_dist, 1), 0.5)
-    bg_dist_logits = 2 / (1 + torch.exp(bg_dist))
-    bg_dist_logits = bg_dist_logits.clamp(min=0, max=1)
-    bg_dist_loss = F.binary_cross_entropy(bg_dist_logits.reshape((-1)), (1-keep_labels).reshape((-1)).float())
-    # fg_dist = (keep_mask_emb - fg_ref_emb.reshape(
-    #     (fg_ref_emb.size(0), fg_ref_emb.size(1), 1, 1))) ** 2 * keep_labels.unsqueeze(1)
-    # mean_fg_dist = torch.sum(fg_dist, (2, 3)) / torch.sum((keep_labels == 1), (1, 2)).unsqueeze(1)
-    # bg_dist = (keep_mask_emb - bg_ref_emb.reshape(
-    #     (bg_ref_emb.size(0), bg_ref_emb.size(1), 1, 1))) ** 2 * (1-keep_labels).unsqueeze(1)
-    # mean_bg_dist = torch.sum(bg_dist, (2, 3)) / torch.sum((keep_labels == 0), (1, 2)).unsqueeze(1)
-    '''
-    return emb_loss, 0.*labels.sum()#(fg_dist_loss + bg_dist_loss)
 
 class DensePoseInterLosses(object):
     def __init__(self, cfg):

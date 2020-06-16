@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-# File:
 
 import contextlib
 import copy
@@ -9,10 +8,8 @@ import itertools
 import json
 import logging
 import os
-import pickle
 from collections import OrderedDict
 import torch
-from pycocotools import coco
 from pycocotools.coco import COCO
 
 from detectron2.data import MetadataCatalog
@@ -21,9 +18,7 @@ from detectron2.structures import BoxMode
 from detectron2.utils.comm import all_gather, is_main_process, synchronize
 from detectron2.utils.logger import create_small_table
 
-from .densepose_coco_evaluation import DensePoseCocoEval, DensePoseEvalMode
-
-coco.unicode = str
+from .densepose_coco_evaluation import DensePoseCocoEval
 
 
 class DensePoseCOCOEvaluator(DatasetEvaluator):
@@ -80,22 +75,14 @@ class DensePoseCOCOEvaluator(DatasetEvaluator):
 
         if self._output_dir:
             file_path = os.path.join(self._output_dir, "coco_densepose_results.json")
-            pkl_file_path = os.path.join(self._output_dir, "coco_densepose_results.pkl")
             with open(file_path, "w") as f:
                 json.dump(self._predictions, f)
                 f.flush()
                 os.fsync(f.fileno())
 
-            with open(pkl_file_path, "wb") as f:
-                pickle.dump(self._predictions, f, pickle.HIGHEST_PROTOCOL)
-
         self._logger.info("Evaluating predictions ...")
         res = OrderedDict()
-        # res["densepose"] = _evaluate_predictions_on_coco(self._coco_api, self._predictions)
-        results_gps, results_gpsm, results_iou = _evaluate_predictions_on_coco(self._coco_api, self._predictions)
-        res["densepose_gps"] = results_gps
-        res["densepose_gpsm"] = results_gpsm
-        res["densepose_iou"] = results_iou
+        res["densepose"] = _evaluate_predictions_on_coco(self._coco_api, self._predictions)
         return res
 
 
@@ -124,25 +111,6 @@ def prediction_to_json(instances, img_id):
     return results
 
 
-# def _evaluate_predictions_on_coco(coco_gt, coco_results):
-#     metrics = ["AP", "AP50", "AP75", "APm", "APl"]
-#
-#     logger = logging.getLogger(__name__)
-#
-#     if len(coco_results) == 0:  # cocoapi does not handle empty results very well
-#         logger.warn("No predictions from the model! Set scores to -1")
-#         return {metric: -1 for metric in metrics}
-#
-#     coco_dt = coco_gt.loadRes(coco_results)
-#     coco_eval = DensePoseCocoEval(coco_gt, coco_dt, "densepose")
-#     coco_eval.evaluate()
-#     coco_eval.accumulate()
-#     coco_eval.summarize()
-#
-#     # the standard metrics
-#     results = {metric: float(coco_eval.stats[idx] * 100) for idx, metric in enumerate(metrics)}
-#     logger.info("Evaluation results for densepose: \n" + create_small_table(results))
-#     return results
 def _evaluate_predictions_on_coco(coco_gt, coco_results):
     metrics = ["AP", "AP50", "AP75", "APm", "APl"]
 
@@ -150,47 +118,15 @@ def _evaluate_predictions_on_coco(coco_gt, coco_results):
 
     if len(coco_results) == 0:  # cocoapi does not handle empty results very well
         logger.warn("No predictions from the model! Set scores to -1")
-        results_gps = {metric: -1 for metric in metrics}
-        results_gpsm = {metric: -1 for metric in metrics}
-        return results_gps, results_gpsm
+        return {metric: -1 for metric in metrics}
 
     coco_dt = coco_gt.loadRes(coco_results)
-    results_gps = _evaluate_predictions_on_coco_gps(coco_gt, coco_dt, metrics)
-    logger.info(
-        "Evaluation results for densepose, GPS metric: \n" + create_small_table(results_gps)
-    )
-    results_iou = _evaluate_predictions_on_coco_iou(coco_gt, coco_dt, metrics)
-    logger.info(
-        "Evaluation results for densepose, IOU metric: \n" + create_small_table(results_iou)
-    )
-    results_gpsm = _evaluate_predictions_on_coco_gpsm(coco_gt, coco_dt, metrics)
-    logger.info(
-        "Evaluation results for densepose, GPSm metric: \n" + create_small_table(results_gpsm)
-    )
-
-    return results_gps, results_gpsm, results_iou
-
-def _evaluate_predictions_on_coco_gps(coco_gt, coco_dt, metrics):
-    coco_eval = DensePoseCocoEval(coco_gt, coco_dt, "densepose", dpEvalMode=DensePoseEvalMode.GPS)
+    coco_eval = DensePoseCocoEval(coco_gt, coco_dt, "densepose")
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
-    results = {metric: float(coco_eval.stats[idx] * 100) for idx, metric in enumerate(metrics)}
-    return results
 
-
-def _evaluate_predictions_on_coco_gpsm(coco_gt, coco_dt, metrics):
-    coco_eval = DensePoseCocoEval(coco_gt, coco_dt, "densepose", dpEvalMode=DensePoseEvalMode.GPSM)
-    coco_eval.evaluate()
-    coco_eval.accumulate()
-    coco_eval.summarize()
+    # the standard metrics
     results = {metric: float(coco_eval.stats[idx] * 100) for idx, metric in enumerate(metrics)}
-    return results
-
-def _evaluate_predictions_on_coco_iou(coco_gt, coco_dt, metrics):
-    coco_eval = DensePoseCocoEval(coco_gt, coco_dt, "densepose", dpEvalMode=DensePoseEvalMode.IOU)
-    coco_eval.evaluate()
-    coco_eval.accumulate()
-    coco_eval.summarize()
-    results = {metric: float(coco_eval.stats[idx] * 100) for idx, metric in enumerate(metrics)}
+    logger.info("Evaluation results for densepose: \n" + create_small_table(results))
     return results
