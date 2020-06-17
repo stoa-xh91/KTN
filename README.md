@@ -15,10 +15,17 @@ Please follow the [installation instruction](https://github.com/facebookresearch
 - Training on COCO dataset using pretrained keypont models([Baidu](https://pan.baidu.com/s/1OyuimZ4Xd6rtC3iD4SbyZQ 
 ). Extraction Code:fccy)
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 python projects/KTN/train_net.py --num-gpus 4 --config-file projects/KTN/configs/densepose_R_50_FPN_KTN_net_s1x.yaml OUTPUT_DIR coco_dp_exps/DensePose_ResNet50_KTN_Net_1lx
+CUDA_VISIBLE_DEVICES=0,1,2,3 python projects/KTN/train_net.py \
+--num-gpus 4 \
+--config-file projects/KTN/configs/densepose_R_50_FPN_KTN_net_s1x.yaml \
+OUTPUT_DIR coco_dp_exps/DensePose_ResNet50_KTN_Net_1lx
 ```
 After training, the final model is saved in OUTPUT_DIR.
 - Testing on COCO dataset using provided models([Baidu](https://pan.baidu.com/s/1OyuimZ4Xd6rtC3iD4SbyZQ). Extraction Code:fccy)
 ```
-CUDA_VISIBLE_DEVICES=0,1,2,3 python projects/KTN/train_net.py --num-gpus 4 --config-file projects/KTN/configs/densepose_R_50_FPN_KTN_net_s1x.yaml --eval-only MODEL.WEIGHTS models/DensePose_KTN_Weights.pth
+CUDA_VISIBLE_DEVICES=0,1,2,3 python projects/KTN/train_net.py \
+--num-gpus 4 \
+--config-file projects/KTN/configs/densepose_R_50_FPN_KTN_net_s1x.yaml \
+--eval-only \
+MODEL.WEIGHTS models/DensePose_KTN_Weights.pth
 ```
