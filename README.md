@@ -12,8 +12,7 @@ The code is developed based on the [Detectron2](https://github.com/facebookresea
 # Installation
 Please follow the [installation instruction](https://github.com/facebookresearch/detectron2) to build environment.
 # Training and Testing
-- Training on COCO dataset using pretrained keypont models([Baidu](https://pan.baidu.com/s/1OyuimZ4Xd6rtC3iD4SbyZQ 
-). Extraction Code:fccy)
+- Training on COCO dataset using pretrained keypont models([Baidu](https://pan.baidu.com/s/1OyuimZ4Xd6rtC3iD4SbyZQ). Extraction Code:fccy)
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3 python projects/KTN/train_net.py \
 --num-gpus 4 \
