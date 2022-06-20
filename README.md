@@ -29,3 +29,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python projects/KTN/train_net.py \
 --eval-only \
 MODEL.WEIGHTS models/DensePose_KTN_Weights.pth
 ```
+
+# Citation
+If you find this work or code is helpful in your research, please cite:
+```
+@inproceedings{densepose:ktn,
+	title={{KTN:} Knowledge Transfer Network for Multi-person DensePose Estimation},
+	author={Xuanhan Wang and Lianli Gao and Jingkuan Song and Heng Tao Shen},
+	pages={3780--3788},
+	booktitle = {ACM MM},
+	year={2020}
+}
+```
